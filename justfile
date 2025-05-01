@@ -1,13 +1,5 @@
 set quiet
 
-PROTO_IN := "./blackjack.proto"
-PROTO_OUT_DIR := "./bjack-api/proto"
-PROTO_OUT := "./bjack-api/proto/blackjack.pb.go ./bjack-api/proto/blackjack_grpc.pb.go"
-API_DIR := "./bjack-api"
-API_EXECUTABLE := "./bin/bjack-api"
-UI_DIR := "./bjack-ui"
-CI_IMAGE_TAG := "0.0.5"
-
 default:
   just --list
 
