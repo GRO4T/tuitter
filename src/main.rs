@@ -3,14 +3,16 @@ use std::error;
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time;
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 use messages::{JoinChatRequest, JoinChatResponse, TuitterMessage};
 use protobuf::Message;
+use std::io;
+use std::io::Write;
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
 
-const SERVER_ADDR: &str = "localhost:8081";
+const SERVER_REGISTER_ADDR: &str = "localhost:8081";
+const SERVER_MSG_ADDR: &str = "localhost:8082";
 const UDP_DATAGRAM_SIZE: usize = 1024;
 
 #[derive(Parser, Debug)]
@@ -26,6 +28,7 @@ struct Args {
 }
 
 struct Client {
+    username: String,
     ip_addr: String,
 }
 
@@ -34,8 +37,8 @@ fn handle_server() -> Result<()> {
 
     let clients_clone = Arc::clone(&clients);
     let conn_listener = thread::spawn(move || {
-        let listener = TcpListener::bind(SERVER_ADDR).unwrap();
-        log::info!("Server listening on {SERVER_ADDR}");
+        let listener = TcpListener::bind(SERVER_REGISTER_ADDR).unwrap();
+        log::info!("Server listening on {SERVER_REGISTER_ADDR}");
         let mut next_port = 8083;
         for stream in listener.incoming() {
             log::debug!("New connection");
@@ -56,6 +59,7 @@ fn handle_server() -> Result<()> {
             // Save new client data
             let mut clients = clients_clone.lock().unwrap();
             (*clients).push(Client {
+                username: join_chat_request.username,
                 ip_addr: format!("localhost:{next_port}"),
             });
 
@@ -65,16 +69,20 @@ fn handle_server() -> Result<()> {
 
     let clients_clone = Arc::clone(&clients);
     let msg_broadcaster = thread::spawn(move || {
-        let socket = UdpSocket::bind("localhost:8082").unwrap();
+        let socket = UdpSocket::bind(SERVER_MSG_ADDR).unwrap();
 
         loop {
-            thread::sleep(time::Duration::from_millis(1000));
+            let mut buf = [0; UDP_DATAGRAM_SIZE];
+            let (number_of_bytes, _) = socket.recv_from(&mut buf).unwrap();
+            let msg = TuitterMessage::parse_from_bytes(&buf[..number_of_bytes]).unwrap();
+
             let clients = clients_clone.lock().unwrap();
             for client in (*clients).iter() {
-                let mut message = TuitterMessage::new();
-                message.sender = String::from("server");
-                message.text = String::from("Hello everyone");
-                let datagram = message.write_to_bytes().unwrap();
+                if msg.sender == client.username {
+                    continue;
+                }
+
+                let datagram = msg.write_to_bytes().unwrap();
 
                 if datagram.len() > UDP_DATAGRAM_SIZE {
                     panic!("UPD datagram size exceeded! ({})", datagram.len())
@@ -93,27 +101,56 @@ fn handle_server() -> Result<()> {
     Ok(())
 }
 
-fn handle_client(username: &str) -> Result<()> {
-    let mut stream = TcpStream::connect(SERVER_ADDR)?;
+fn handle_client(username: String) -> Result<()> {
+    let mut stream = TcpStream::connect(SERVER_REGISTER_ADDR)?;
 
     // Join the chat
     let mut join_chat_request = JoinChatRequest::new();
-    join_chat_request.username = username.to_owned();
+    join_chat_request.username = username.clone();
     join_chat_request.write_to_writer(&mut stream)?;
     stream.shutdown(Shutdown::Write)?;
 
     // Wait for server response
     let join_chat_response = JoinChatResponse::parse_from_reader(&mut stream)?;
 
-    // Listen for messages
-    let ip_addr = format!("localhost:{}", join_chat_response.port);
-    let socket = UdpSocket::bind(ip_addr)?;
-    loop {
-        let mut buf = [0; UDP_DATAGRAM_SIZE];
-        let (number_of_bytes, _) = socket.recv_from(&mut buf).unwrap();
-        let msg = TuitterMessage::parse_from_bytes(&buf[..number_of_bytes])?;
-        println!("{}: {}", msg.sender, msg.text);
-    }
+    let listener = thread::spawn(move || {
+        let ip_addr = format!("localhost:{}", join_chat_response.port);
+        let socket = UdpSocket::bind(ip_addr).unwrap();
+        loop {
+            let mut buf = [0; UDP_DATAGRAM_SIZE];
+            let (number_of_bytes, _) = socket.recv_from(&mut buf).unwrap();
+            let msg = TuitterMessage::parse_from_bytes(&buf[..number_of_bytes]).unwrap();
+            println!("\n----------------------------");
+            println!("{}: {}", msg.sender, msg.text.trim());
+            println!("----------------------------");
+            print!("$ ");
+            io::stdout().flush().unwrap();
+        }
+    });
+
+    let _ = thread::spawn(move || {
+        let socket = UdpSocket::bind("localhost:0").unwrap();
+
+        loop {
+            print!("$ ");
+            io::stdout().flush().unwrap();
+            let mut text = String::new();
+            io::stdin().read_line(&mut text).unwrap();
+            let mut msg = TuitterMessage::new();
+            msg.sender = username.clone();
+            msg.text = text.clone();
+            let datagram = msg.write_to_bytes().unwrap();
+
+            if datagram.len() > UDP_DATAGRAM_SIZE {
+                panic!("UPD datagram size exceeded! ({})", datagram.len())
+            }
+
+            socket.send_to(&datagram[..], SERVER_MSG_ADDR).unwrap();
+        }
+    });
+
+    listener.join().unwrap();
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -127,7 +164,7 @@ fn main() -> Result<()> {
         handle_server()?;
     } else if !args.user.is_empty() {
         log::info!("TUItter client started (username={})", args.user);
-        handle_client(&args.user)?;
+        handle_client(args.user)?;
     } else {
         panic!("User not specified!");
     }
