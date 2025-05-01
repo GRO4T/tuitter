@@ -5,12 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
 include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
-use messages::{JoinChatRequest, JoinChatResponse};
+use messages::{JoinChatRequest, JoinChatResponse, TuitterMessage};
 use protobuf::Message;
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
 
 const SERVER_ADDR: &str = "localhost:8081";
+const UDP_DATAGRAM_SIZE: usize = 1024;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -70,9 +71,17 @@ fn handle_server() -> Result<()> {
             thread::sleep(time::Duration::from_millis(1000));
             let clients = clients_clone.lock().unwrap();
             for client in (*clients).iter() {
-                log::debug!("Sending `Hello` to {}", client.ip_addr);
+                let mut message = TuitterMessage::new();
+                message.sender = String::from("server");
+                message.text = String::from("Hello everyone");
+                let datagram = message.write_to_bytes().unwrap();
+
+                if datagram.len() > UDP_DATAGRAM_SIZE {
+                    panic!("UPD datagram size exceeded! ({})", datagram.len())
+                }
+
                 socket
-                    .send_to("Hello".as_bytes(), client.ip_addr.as_str())
+                    .send_to(&datagram[..], client.ip_addr.as_str())
                     .unwrap();
             }
         }
@@ -98,12 +107,12 @@ fn handle_client(username: &str) -> Result<()> {
 
     // Listen for messages
     let ip_addr = format!("localhost:{}", join_chat_response.port);
-    let socket = UdpSocket::bind(ip_addr).unwrap();
+    let socket = UdpSocket::bind(ip_addr)?;
     loop {
-        let mut buf = [0; 10];
-        socket.recv_from(&mut buf).unwrap();
-        let msg = String::from_utf8(buf.to_vec()).unwrap();
-        log::debug!("Received: {msg}");
+        let mut buf = [0; UDP_DATAGRAM_SIZE];
+        let (number_of_bytes, _) = socket.recv_from(&mut buf).unwrap();
+        let msg = TuitterMessage::parse_from_bytes(&buf[..number_of_bytes])?;
+        println!("{}: {}", msg.sender, msg.text);
     }
 }
 
