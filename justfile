@@ -22,10 +22,10 @@ clean:
 build:
 	cargo build
 
-run_server:
+run_server: build
 	RUST_LOG=debug ./target/debug/tuitter --server
 
-run_client USER:
+run_client USER: build
 	RUST_LOG=debug ./target/debug/tuitter --user {{USER}}
 
 test:

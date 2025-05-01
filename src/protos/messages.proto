@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+message JoinChatRequest {
+    string username = 1;
+}
+
+message JoinChatResponse {
+    int32 status = 1;
+    string details = 2;
+    int32 port = 3;
+}

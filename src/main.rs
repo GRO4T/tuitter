@@ -1,13 +1,12 @@
 use clap::Parser;
-use env_logger;
-use log;
 use std::error;
-use std::io::prelude::*;
-use std::io::{BufReader, BufWriter};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
+include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
+use messages::{JoinChatRequest, JoinChatResponse};
+use protobuf::Message;
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
 
@@ -39,20 +38,27 @@ fn handle_server() -> Result<()> {
         let mut next_port = 8083;
         for stream in listener.incoming() {
             log::debug!("New connection");
-            let stream = stream.unwrap();
-            let mut buf_reader = BufReader::new(&stream);
-            let mut msg = String::new();
-            buf_reader.read_line(&mut msg).unwrap();
-            if msg.trim() == "ping" {
-                let mut buf_writer = BufWriter::new(&stream);
-                buf_writer.write(next_port.to_string().as_bytes()).unwrap();
-                buf_writer.flush().unwrap();
-                let mut clients = clients_clone.lock().unwrap();
-                (*clients).push(Client {
-                    ip_addr: format!("localhost:{next_port}"),
-                });
-                next_port += 1;
-            }
+            let mut stream = stream.unwrap();
+
+            // Read connection request
+            let join_chat_request = JoinChatRequest::parse_from_reader(&mut stream);
+            let join_chat_request = join_chat_request.unwrap();
+            log::debug!("{} joined the chat", join_chat_request.username);
+
+            // Send connection response
+            let mut join_chat_response = JoinChatResponse::new();
+            join_chat_response.status = 200;
+            join_chat_response.port = next_port;
+            join_chat_response.write_to_writer(&mut stream).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+
+            // Save new client data
+            let mut clients = clients_clone.lock().unwrap();
+            (*clients).push(Client {
+                ip_addr: format!("localhost:{next_port}"),
+            });
+
+            next_port += 1;
         }
     });
 
@@ -78,22 +84,21 @@ fn handle_server() -> Result<()> {
     Ok(())
 }
 
-fn handle_client() -> Result<()> {
-    let stream = TcpStream::connect(SERVER_ADDR)?;
+fn handle_client(username: &str) -> Result<()> {
+    let mut stream = TcpStream::connect(SERVER_ADDR)?;
 
-    let mut buf_writer = BufWriter::new(&stream);
-    let request = "ping\n";
-    buf_writer.write(request.as_bytes())?;
-    buf_writer.flush()?;
+    // Join the chat
+    let mut join_chat_request = JoinChatRequest::new();
+    join_chat_request.username = username.to_owned();
+    join_chat_request.write_to_writer(&mut stream)?;
+    stream.shutdown(Shutdown::Write)?;
 
-    let mut buf_reader = BufReader::new(&stream);
-    let mut response = String::new();
-    buf_reader.read_to_string(&mut response)?;
-    let udp_port: u32 = response.parse()?;
+    // Wait for server response
+    let join_chat_response = JoinChatResponse::parse_from_reader(&mut stream)?;
 
-    log::info!("Listening on localhost:{udp_port}");
-    let socket = UdpSocket::bind(format!("localhost:{udp_port}")).unwrap();
-
+    // Listen for messages
+    let ip_addr = format!("localhost:{}", join_chat_response.port);
+    let socket = UdpSocket::bind(ip_addr).unwrap();
     loop {
         let mut buf = [0; 10];
         socket.recv_from(&mut buf).unwrap();
@@ -103,14 +108,17 @@ fn handle_client() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let mut request = JoinChatRequest::new();
+    request.username = "Bob".to_string();
+
     env_logger::init();
     let args = Args::parse();
     if args.server {
         log::info!("TUItter server started");
         handle_server()?;
-    } else if args.user != "" {
-        log::info!("{} joined the chat", args.user);
-        handle_client()?;
+    } else if !args.user.is_empty() {
+        log::info!("TUItter client started (username={})", args.user);
+        handle_client(&args.user)?;
     } else {
         panic!("User not specified!");
     }
